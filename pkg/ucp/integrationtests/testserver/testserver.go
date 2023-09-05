@@ -37,9 +37,13 @@ import (
 	etcdclient "go.etcd.io/etcd/client/v3"
 
 	v1 "github.com/radius-project/radius/pkg/armrpc/api/v1"
+	backend_ctrl "github.com/radius-project/radius/pkg/armrpc/asyncoperation/controller"
+	"github.com/radius-project/radius/pkg/armrpc/asyncoperation/statusmanager"
+	"github.com/radius-project/radius/pkg/armrpc/asyncoperation/worker"
 	"github.com/radius-project/radius/pkg/armrpc/rpctest"
 	"github.com/radius-project/radius/pkg/armrpc/servicecontext"
 	"github.com/radius-project/radius/pkg/middleware"
+	"github.com/radius-project/radius/pkg/ucp/backend"
 	"github.com/radius-project/radius/pkg/ucp/data"
 	"github.com/radius-project/radius/pkg/ucp/dataprovider"
 	"github.com/radius-project/radius/pkg/ucp/frontend/api"
@@ -156,6 +160,8 @@ func StartWithMocks(t *testing.T, configureModules func(options modules.Options)
 	secretProvider := secretprovider.NewSecretProvider(secretprovider.SecretProviderOptions{})
 	secretProvider.SetClient(secretClient)
 
+	statusManager := statusmanager.NewMockStatusManager(ctrl)
+
 	router := chi.NewRouter()
 	router.Use(servicecontext.ARMRequestCtx(pathBase, "global"))
 
@@ -176,6 +182,7 @@ func StartWithMocks(t *testing.T, configureModules func(options modules.Options)
 		DataProvider:   dataProvider,
 		SecretProvider: secretProvider,
 		SpecLoader:     specLoader,
+		StatusManager:  statusManager,
 	}
 
 	if configureModules == nil {
@@ -222,6 +229,7 @@ func StartWithETCD(t *testing.T, configureModules func(options modules.Options) 
 	})
 
 	ctx, cancel := testcontext.NewWithCancel(t)
+	t.Cleanup(cancel)
 
 	stoppedChan := make(chan struct{})
 	defer close(stoppedChan)
@@ -235,7 +243,9 @@ func StartWithETCD(t *testing.T, configureModules func(options modules.Options) 
 		// and you'll be able to see the spam from etcd.
 		//
 		// This is caught by the race checker and will fail your pr if you do it.
-		ctx := context.Background()
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+
 		err := etcd.Run(ctx)
 		if err != nil {
 			t.Logf("error from etcd: %v", err)
@@ -262,7 +272,25 @@ func StartWithETCD(t *testing.T, configureModules func(options modules.Options) 
 	pathBase := "/" + uuid.New().String()
 	dataProvider := dataprovider.NewStorageProvider(storageOptions)
 	secretProvider := secretprovider.NewSecretProvider(secretOptions)
-	queueProvider := queueprovider.New("System.Resources", queueOptions)
+	queueProvider := queueprovider.New(backend.UCPProviderName, queueOptions)
+
+	operationStorageClient, err := dataProvider.GetStorageClient(ctx, backend.UCPProviderName+"/operationStatuses")
+	require.NoError(t, err)
+
+	queueClient, err := queueProvider.GetClient(ctx)
+	require.NoError(t, err)
+
+	statusManager := statusmanager.New(operationStorageClient, queueClient, backend.UCPProviderName, "global")
+
+	registry := worker.NewControllerRegistry(dataProvider)
+	err = backend.RegisterControllers(ctx, registry, backend_ctrl.Options{DataProvider: dataProvider})
+	require.NoError(t, err)
+
+	w := worker.New(worker.Options{}, statusManager, queueClient, registry)
+	go func() {
+		err = w.Start(ctx)
+		require.NoError(t, err)
+	}()
 
 	router := chi.NewRouter()
 	router.Use(servicecontext.ARMRequestCtx(pathBase, "global"))
@@ -284,6 +312,7 @@ func StartWithETCD(t *testing.T, configureModules func(options modules.Options) 
 		SecretProvider: secretProvider,
 		SpecLoader:     specLoader,
 		QueueProvider:  queueProvider,
+		StatusManager:  statusManager,
 	}
 
 	if configureModules == nil {

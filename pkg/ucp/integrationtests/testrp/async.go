@@ -33,6 +33,7 @@ import (
 	"github.com/radius-project/radius/pkg/armrpc/servicecontext"
 	"github.com/radius-project/radius/pkg/middleware"
 	"github.com/radius-project/radius/pkg/ucp/integrationtests/testserver"
+	queueprovider "github.com/radius-project/radius/pkg/ucp/queue/provider"
 	"github.com/radius-project/radius/test/testcontext"
 	"github.com/stretchr/testify/require"
 )
@@ -58,10 +59,17 @@ func AsyncResource(t *testing.T, ts *testserver.TestServer, rootScope string, pu
 
 	resourceType := "System.Test/testResources"
 
+	// We can share the storage provider with the test server.
 	operationStoreClient, err := ts.Clients.StorageProvider.GetStorageClient(ctx, "System.Test/operationStatuses")
 	require.NoError(t, err)
 
-	queueClient, err := ts.Clients.QueueProvider.GetClient(ctx)
+	// Do not share the queue.
+	queueOptions := queueprovider.QueueProviderOptions{
+		Provider: queueprovider.TypeInmemory,
+		InMemory: &queueprovider.InMemoryQueueOptions{},
+	}
+	queueProvider := queueprovider.New("System.Test", queueOptions)
+	queueClient, err := queueProvider.GetClient(ctx)
 	require.NoError(t, err)
 
 	statusManager := statusmanager.New(operationStoreClient, queueClient, "System.Test", v1.LocationGlobal)

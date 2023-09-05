@@ -217,6 +217,7 @@ ucp:
 
 ### UCP 
 ```yaml
+location: 'global'
 storageProvider:
   provider: "apiserver"
   apiserver:
